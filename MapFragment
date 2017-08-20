@@ -1,0 +1,437 @@
+public class MapFragment extends Fragment implements
+        OnMapReadyCallback,
+        GoogleApiClient.ConnectionCallbacks,
+        GoogleApiClient.OnConnectionFailedListener,
+        LocationListener {
+    public static class RangerViewHolder extends RecyclerView.ViewHolder {
+        public TextView ranger_name;
+        public TextView ranger_id;
+        public ImageView ranger_image;
+
+        public RangerViewHolder(View v) {
+            super(v);
+            ranger_name = (TextView) itemView.findViewById(R.id.ranger_name);
+            ranger_id = (TextView) itemView.findViewById(R.id.ranger_id);
+            ranger_image = (ImageView) itemView.findViewById(R.id.ranger_image);
+        }
+    }
+    private FirebaseRecyclerAdapter<RangerDetailsModel, RangerViewHolder> mFirebaseAdapter;
+    private ProgressBar mProgressBar;
+    private DatabaseReference mFirebaseDatabaseReference;
+    private FirebaseUser mFirebaseUser;
+    private FirebaseAuth mFirebaseAuth;
+    private RecyclerView rangerRecyclerView;
+    private LinearLayoutManager mLinearLayoutManager;
+    private static final String TAG = MapFragment.class.getSimpleName();
+    private GoogleMap mMap;
+    private CameraPosition mCameraPosition;
+    private Context mcontext;
+    // The entry point to Google Play services, used by the Places API and Fused Location Provider.
+    private GoogleApiClient mGoogleApiClient;
+    // A request object to store parameters for requests to the FusedLocationProviderApi.
+    private LocationRequest mLocationRequest;
+    // The desired interval for location updates. Inexact. Updates may be more or less frequent.
+    private static final long UPDATE_INTERVAL_IN_MILLISECONDS = 10000;
+    // The fastest rate for active location updates. Exact. Updates will never be more frequent
+    // than this value.
+    private static final long FASTEST_UPDATE_INTERVAL_IN_MILLISECONDS =
+            UPDATE_INTERVAL_IN_MILLISECONDS / 2;
+    protected static final int REQUEST_CHECK_SETTINGS = 0x1;
+    // A default location (Sydney, Australia) and default zoom to use when location permission is
+    // not granted.
+    private final LatLng mDefaultLocation = new LatLng(-1.32632, 36.78537);
+    private static final int DEFAULT_ZOOM = 10;
+    private static final int PERMISSIONS_REQUEST_ACCESS_FINE_LOCATION = 1;
+    private boolean mLocationPermissionGranted;
+    public int looper;
+    // The geographical location where the device is currently located.
+    public Location mCurrentLocation;
+    private SupportMapFragment mMapFragment;
+    // Keys for storing activity state.
+    private static final String KEY_CAMERA_POSITION = "camera_position";
+    private static final String KEY_LOCATION = "location";
+    private int itemposition;
+    List<RangerDetailsModel> rangersList;
+    LatLng[] latlng;
+
+    @Override
+    public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
+        View v = inflater.inflate(R.layout.map_fragment, container, false);
+        // Retrieve location and camera position from saved instance state.
+        if (savedInstanceState != null) {
+            mCurrentLocation = savedInstanceState.getParcelable(KEY_LOCATION);
+            mCameraPosition = savedInstanceState.getParcelable(KEY_CAMERA_POSITION);
+        }
+        // Build the Play services client for use by the Fused Location Provider and the Places API.
+        buildGoogleApiClient();
+        mGoogleApiClient.connect();
+        settingsrequest();
+        mProgressBar = (ProgressBar)v.findViewById(R.id.mprogressBar);
+
+        rangerRecyclerView = (RecyclerView) v.findViewById(R.id.near_by_recyclerview);
+        mLinearLayoutManager = new LinearLayoutManager(getContext(), LinearLayoutManager.HORIZONTAL, false);
+        mLinearLayoutManager.setStackFromEnd(false);
+
+        mFirebaseAuth = FirebaseAuth.getInstance();
+        mFirebaseUser = mFirebaseAuth.getCurrentUser();
+
+        mFirebaseDatabaseReference = FirebaseDatabase.getInstance().getReference();
+        mFirebaseAdapter = new FirebaseRecyclerAdapter<RangerDetailsModel, RangerViewHolder>(
+                RangerDetailsModel.class,
+                R.layout.map_cardview,
+                RangerViewHolder.class,
+                mFirebaseDatabaseReference.child("Bittrack").child("Rangers")) {
+
+            @Override
+            protected void populateViewHolder(RangerViewHolder viewHolder, RangerDetailsModel ranger, int position) {
+                mProgressBar.setVisibility(ProgressBar.INVISIBLE);
+                viewHolder.ranger_name.setText(ranger.getranger_name());
+                viewHolder.ranger_id.setText(ranger.getranger_id());
+                Picasso.with(getContext())
+                        .load(ranger.getmobile_number())
+                        .error(R.mipmap.ic_launcher)
+                        .placeholder(R.mipmap.ic_launcher)
+                        .into(viewHolder.ranger_image);
+            }
+        };
+        rangerRecyclerView.setLayoutManager(mLinearLayoutManager);
+        rangerRecyclerView.setAdapter(mFirebaseAdapter);
+        LinearSnapHelper snapHelper = new LinearSnapHelper() {
+            @Override
+            public int findTargetSnapPosition(RecyclerView.LayoutManager layoutManager, int velocityX, int velocityY) {
+                View centerView = findSnapView(layoutManager);
+                if (centerView == null)
+                    return RecyclerView.NO_POSITION;
+
+                int position = layoutManager.getPosition(centerView);
+                int targetPosition = -1;
+                if (layoutManager.canScrollHorizontally()) {
+                    if (velocityX < 0) {
+                        targetPosition = position - 1;
+                    } else {
+                        targetPosition = position + 1;
+                    }
+                }
+
+                if (layoutManager.canScrollVertically()) {
+                    if (velocityY < 0) {
+                        targetPosition = position - 1;
+                    } else {
+                        targetPosition = position + 1;
+                    }
+                }
+
+                final int firstItem = 0;
+                final int lastItem = layoutManager.getItemCount() - 1;
+                targetPosition = Math.min(lastItem, Math.max(targetPosition, firstItem));
+                return targetPosition;
+            }
+        };
+        snapHelper.attachToRecyclerView(rangerRecyclerView);
+        rangerRecyclerView.addOnScrollListener(new RecyclerView.OnScrollListener() {
+            @Override
+            public void onScrollStateChanged(RecyclerView recyclerView, int newState) {
+                super.onScrollStateChanged(recyclerView, newState);
+                itemposition = mLinearLayoutManager.findFirstCompletelyVisibleItemPosition();
+                updateMarkers();
+            }
+        });
+        return v;
+    }
+
+    //Get the device location and nearby places when the activity is restored after a pause.
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        if (mGoogleApiClient.isConnected()) {
+            //mFirebaseAuth = FirebaseAuth.getInstance();
+            //mFirebaseUser = mFirebaseAuth.getCurrentUser();
+            getDeviceLocation();
+
+        }
+        updateMarkers();
+    }
+
+    /**
+     * Saves the state of the map when the activity is paused.
+     */
+    @Override
+    public void onSaveInstanceState(Bundle outState) {
+        if (mMap != null) {
+            outState.putParcelable(KEY_CAMERA_POSITION, mMap.getCameraPosition());
+            outState.putParcelable(KEY_LOCATION, mCurrentLocation);
+            super.onSaveInstanceState(outState);
+        }
+    }
+
+    /**
+     * Gets the device's current location and builds the map
+     * when the Google Play services client is successfully connected.
+     */
+    /**
+     * Gets the device's current location and builds the map
+     * when the Google Play services client is successfully connected.
+     */
+    @Override
+    public void onConnected(Bundle connectionHint) {
+        getDeviceLocation();
+
+        // Build the map.
+        mMapFragment = SupportMapFragment.newInstance();
+        FragmentTransaction fragmentTransaction = getChildFragmentManager().beginTransaction();
+        fragmentTransaction.add(R.id.map, mMapFragment, "map");
+        fragmentTransaction.commit();
+        mMapFragment.getMapAsync(this);
+    }
+    @Override
+    public void onConnectionFailed(@NonNull ConnectionResult result) {
+        // Refer to the reference doc for ConnectionResult to see what error codes might
+        // be returned in onConnectionFailed.
+        Log.d(TAG, "Play services connection failed: ConnectionResult.getErrorCode() = "
+                + result.getErrorCode());
+    }
+
+    /**
+     * Handles suspension of the connection to the Google Play services client.
+     */
+    @Override
+    public void onConnectionSuspended(int cause) {
+        Log.d(TAG, "Play services connection suspended");
+    }
+
+    /**
+     * Handles the callback when location changes.
+     */
+    @Override
+    public void onLocationChanged(Location location) {
+        mCurrentLocation = location;
+        mFirebaseAuth = FirebaseAuth.getInstance();
+        mFirebaseUser = mFirebaseAuth.getCurrentUser();
+        if(mFirebaseUser!=null) {
+            mFirebaseDatabaseReference.child("Bittrack").child("Rangers").child(mFirebaseUser.getUid()).child("current_latitude").setValue(mCurrentLocation.getLatitude());
+            mFirebaseDatabaseReference.child("Bittrack").child("Rangers").child(mFirebaseUser.getUid()).child("current_longitude").setValue(mCurrentLocation.getLongitude());
+        }
+        updateMarkers();
+    }
+    /**
+     * Manipulates the map when it's available.
+     * This callback is triggered when the map is ready to be used.
+     */
+    @Override
+    public void onMapReady(GoogleMap map) {
+        mMap = map;
+
+        // Turn on the My Location layer and the related control on the map.
+        updateLocationUI();
+        // Add markers for nearby places.
+        updateMarkers();
+
+
+    }
+    /**
+     * Builds a GoogleApiClient.
+     * Uses the addApi() method to request the Google Places API and the Fused Location Provider.
+     */
+    private synchronized void buildGoogleApiClient() {
+
+
+        if (mGoogleApiClient == null) {
+            mGoogleApiClient = new GoogleApiClient.Builder(getContext())
+                    .addConnectionCallbacks(this)
+                    .addOnConnectionFailedListener(this)
+                    .addApi(LocationServices.API)
+                    .build();
+        }
+    }
+    /**
+     * Gets the current location of the device and starts the location update notifications.
+     */
+    private void getDeviceLocation() {
+        /*
+         * Request location permission, so that we can get the location of the
+         * device. The result of the permission request is handled by a callback,
+         * onRequestPermissionsResult.
+         */
+        if (ContextCompat.checkSelfPermission(getContext(), android.Manifest.permission.ACCESS_FINE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED) {
+            mLocationPermissionGranted = true;
+        } else {
+            ActivityCompat.requestPermissions(getActivity(),
+                    new String[]{android.Manifest.permission.ACCESS_FINE_LOCATION},
+                    PERMISSIONS_REQUEST_ACCESS_FINE_LOCATION);
+        }
+
+        /*
+         * Get the best and most recent location of the device, which may be null in rare
+         * cases when a location is not available.
+         * Also request regular updates about the device location.
+         */
+        if (mLocationPermissionGranted) {
+            mCurrentLocation = LocationServices.FusedLocationApi.getLastLocation(mGoogleApiClient);
+            LocationServices.FusedLocationApi.requestLocationUpdates(mGoogleApiClient,
+                    mLocationRequest, this);
+            mFirebaseAuth = FirebaseAuth.getInstance();
+            mFirebaseUser = mFirebaseAuth.getCurrentUser();
+                if(mCurrentLocation!=null&&mFirebaseUser!=null){
+                    mFirebaseDatabaseReference.child("Bittrack").child("Rangers").child(mFirebaseUser.getUid()).child("current_latitude").setValue(mCurrentLocation.getLatitude());
+                    mFirebaseDatabaseReference.child("Bittrack").child("Rangers").child(mFirebaseUser.getUid()).child("current_longitude").setValue(mCurrentLocation.getLongitude());
+
+                }
+        }
+    }
+    @Override
+    public void onRequestPermissionsResult(int requestCode,
+                                           @NonNull String permissions[],
+                                           @NonNull int[] grantResults) {
+        mLocationPermissionGranted = false;
+        switch (requestCode) {
+            case PERMISSIONS_REQUEST_ACCESS_FINE_LOCATION: {
+                // If request is cancelled, the result arrays are empty.
+                if (grantResults.length > 0
+                        && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                    mLocationPermissionGranted = true;
+                }
+            }
+        }
+        updateLocationUI();
+    }
+    /**
+     * Adds markers for places nearby the device and turns the My Location feature on or off,
+     * provided location permission has been granted.
+     */
+    private void updateMarkers() {
+        if (mMap == null) {
+            return;
+        }
+        rangersList = new ArrayList<>();
+        latlng = new LatLng[6];
+
+        final DatabaseReference mref = mFirebaseDatabaseReference.child("Bittrack").child("Rangers");
+        mref.addValueEventListener(new ValueEventListener() {
+
+            @Override
+            public void onDataChange(DataSnapshot dataSnapshot) {
+                for(DataSnapshot child : dataSnapshot.getChildren() ) {
+                    RangerDetailsModel rangerDetailsModel;
+                    rangerDetailsModel = child.getValue(RangerDetailsModel.class);
+                    rangersList.add(rangerDetailsModel);
+
+                    if (mFirebaseUser != null) {
+                        if (child.getKey() != mFirebaseUser.getUid()) {
+                            if (rangersList.indexOf(rangerDetailsModel) == itemposition) {
+                                mMap.addMarker(createMarker(rangerDetailsModel.getcurrent_latitude(), rangerDetailsModel.getcurrent_longitude(), rangerDetailsModel.getranger_name(), rangerDetailsModel.getranger_id(), BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE))).showInfoWindow();
+                                mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(new LatLng(rangerDetailsModel.getcurrent_latitude(), rangerDetailsModel.getcurrent_longitude()), 15));
+                            } else {
+                                mMap.addMarker(createMarker(rangerDetailsModel.getcurrent_latitude(), rangerDetailsModel.getcurrent_longitude(), rangerDetailsModel.getranger_name(), rangerDetailsModel.getranger_id(), BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED)));
+                            }
+                        } else if (child.getKey() == mFirebaseUser.getUid() && rangersList.indexOf(rangerDetailsModel) == itemposition) {
+                            mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(new LatLng(rangerDetailsModel.getcurrent_latitude(), rangerDetailsModel.getcurrent_longitude()), 15));
+                        }
+                    }
+                }
+            }
+
+            @Override
+            public void onCancelled(DatabaseError databaseError) {
+
+            }
+        });
+    }
+    protected MarkerOptions createMarker(double latitude, double longitude, String title, String snippet, BitmapDescriptor bitmapdescriptor) {
+
+        return new MarkerOptions()
+                .position(new LatLng(latitude, longitude))
+                .anchor(0.5f, 0.5f)
+                .title(title)
+                .snippet(snippet)
+                .icon(bitmapdescriptor);
+
+    }
+    /**
+     * Updates the map's UI settings based on whether the user has granted location permission.
+     */
+    @SuppressWarnings("MissingPermission")
+    private void updateLocationUI() {
+        if (mMap == null) {
+            return;
+        }
+
+        if (mLocationPermissionGranted) {
+            mMap.setMyLocationEnabled(true);
+            mMap.getUiSettings().setMyLocationButtonEnabled(true);
+        } else {
+            mMap.setMyLocationEnabled(false);
+            mMap.getUiSettings().setMyLocationButtonEnabled(false);
+            mCurrentLocation = null;
+        }
+    }
+    public void settingsrequest()
+    {
+        mLocationRequest = new LocationRequest();
+        /*
+         * Sets the desired interval for active location updates. This interval is
+         * inexact. You may not receive updates at all if no location sources are available, or
+         * you may receive them slower than requested. You may also receive updates faster than
+         * requested if other applications are requesting location at a faster interval.
+         */
+        mLocationRequest.setInterval(UPDATE_INTERVAL_IN_MILLISECONDS);
+        /*
+         * Sets the fastest rate for active location updates. This interval is exact, and your
+         * application will never receive updates faster than this value.
+         */
+        mLocationRequest.setFastestInterval(FASTEST_UPDATE_INTERVAL_IN_MILLISECONDS);
+        mLocationRequest.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
+        LocationSettingsRequest.Builder builder = new LocationSettingsRequest.Builder()
+                .addLocationRequest(mLocationRequest);
+        builder.setAlwaysShow(true); //this is the key ingredient
+
+        PendingResult<LocationSettingsResult> result =
+                LocationServices.SettingsApi.checkLocationSettings(mGoogleApiClient, builder.build());
+        result.setResultCallback(new ResultCallback<LocationSettingsResult>() {
+            @Override
+            public void onResult(LocationSettingsResult result) {
+                final Status status = result.getStatus();
+                final LocationSettingsStates state = result.getLocationSettingsStates();
+                switch (status.getStatusCode()) {
+                    case LocationSettingsStatusCodes.SUCCESS:
+                        getDeviceLocation();
+                        break;
+                    case LocationSettingsStatusCodes.RESOLUTION_REQUIRED:
+                        // Location settings are not satisfied. But could be fixed by showing the user
+                        // a dialog.
+                        try {
+                            // Show the dialog by calling startResolutionForResult(),
+                            // and check the result in onActivityResult().
+                            status.startResolutionForResult(getActivity(), REQUEST_CHECK_SETTINGS);
+                        } catch (IntentSender.SendIntentException e) {
+                            // Ignore the error.
+                        }
+                        break;
+                    case LocationSettingsStatusCodes.SETTINGS_CHANGE_UNAVAILABLE:
+                        // Location settings are not satisfied. However, we have no way to fix the
+                        // settings so we won't show the dialog.
+                        break;
+                }
+            }
+        });
+    }
+    @Override
+    public void onActivityResult(int requestCode, int resultCode, Intent data) {
+        switch (requestCode) {
+// Check for the integer request code originally supplied to startResolutionForResult().
+            case REQUEST_CHECK_SETTINGS:
+                switch (resultCode) {
+                    case Activity.RESULT_OK:
+                        updateMarkers();
+                        break;
+                    case Activity.RESULT_CANCELED:
+                        settingsrequest();//keep asking if imp or do whatever
+                        break;
+                }
+                break;
+        }
+    }
+
+
+}
